@@ -2,6 +2,32 @@
 
 > 由 Cloudflare Workers 版反代面板移植的 VPS 自托管版本。零依赖 Node 实现，**不占用 80/443 端口**，支持**前后端分离**（前端登录域名与后端推流域名不同），只反代前端域名也能自动识别并反代后端推流。
 
+> **本仓库是 fork**：基于 [MakkaPakka518/EmbyProxy-VPS](https://github.com/MakkaPakka518/EmbyProxy-VPS) **v1.5.0**。
+> 除下表差异外与原版一致，可搭配 iOS App **RelayConsole** 使用。
+
+## Fork 与原版的差异
+
+| 项目 | 原版 | 本 fork |
+|---|---|---|
+| 节点备注 | 输入框存在但不保存 | 保存为 `name`，面板与 App 都显示 |
+| 前后端分离域名 | 全局一对（`/api/config`） | **按节点**配置 |
+| 修改短路径前缀 | 会新建一条节点 | 传 `originalPrefix` 原地改名 |
+| 图片缓存开关 | 布尔 `false` 不生效 | 已修复 |
+| 订阅者密码列表 | 任意登录用户可读 | 仅管理员 |
+| 备份文件 | `{routes, config}` | `{routes}`（旧备份仍可导入，`config` 段忽略） |
+| `/api/config` | 有 | 已移除 |
+
+### 接口约定（客户端对接用）
+
+- `POST /api/routes` 新增参数：`name`、`frontendDomain`、`backendDomain`、`originalPrefix`
+- **frontendDomain**（前端域名）：同一台服务器的别名，响应里的地址改写成 `/前缀/路径`，回源到节点线路
+- **backendDomain**（推流域名）：另一台媒体主机，改写成 `/前缀/http://host:port/路径`，**直接回源到该主机**
+- 未传的字段保持原值，旧客户端/旧脚本不受影响
+
+### 与 App 搭配
+
+iOS 端 **RelayConsole**（Scripting App 项目）通过 `Cookie: admin_token=<面板密钥>` 直接调用上述接口，无需登录流程。
+
 - **管理面板**：iOS 风格 UI（Apple 设计语言），系统级 SF 字体，SF Symbols 风格 SVG 图标（无 emoji），支持深色模式
 - **节点列表自动展示延迟**：每个节点卡片自动测速并实时显示延迟，点击徽章可重新测速
 - **节点图标**：内置 TFEL Emby 图标库（528 个透明 PNG），添加/编辑节点时可搜索选择
@@ -83,7 +109,7 @@ sudo bash install.sh
 （GitHub 仓库上传后，也可以一行搞定，无需下载文件：）
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/MakkaPakka518/EmbyProxy-VPS/refs/heads/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/StarYunLee/EmbyProxy-VPS/refs/heads/main/install.sh | bash
 ```
 
 脚本自动完成全部步骤：检测 Node.js → 下载程序文件 → 生成管理密钥 → 初始化配置 → 注册 systemd（开机自启 + 崩溃自动重启）→ 验证面板 → 输出面板地址和管理密码。
@@ -98,7 +124,7 @@ curl -sSL https://raw.githubusercontent.com/MakkaPakka518/EmbyProxy-VPS/refs/hea
 sudo bash install.sh uninstall
 ```
 
-（也可以不下载文件直接卸载：`curl -sSL https://raw.githubusercontent.com/MakkaPakka518/EmbyProxy-VPS/refs/heads/main/install.sh | bash -s uninstall`）
+（也可以不下载文件直接卸载：`curl -sSL https://raw.githubusercontent.com/StarYunLee/EmbyProxy-VPS/refs/heads/main/install.sh | bash -s uninstall`）
 
 执行后会先问一句确认，输入 `y` 回车才真正删除，误输入或回车直接取消，不会动任何东西。卸载后想重装，再跑一次安装命令即可。
 

@@ -256,32 +256,6 @@
     </div>
 
     <div class="container">
-        <!-- 反代配置（前后端分离） -->
-        <div class="card">
-            <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4 4 0 1 1 0-8 5 5 0 0 1 9.6 1.3A3.5 3.5 0 0 1 17 18H7z"/></svg> 反代配置（前后端分离）</h2>
-            <div style="font-size:13px;color:var(--text-sec);margin-bottom:14px;line-height:1.6;">Emby 前端登录域名与后端推流域名可不同。只需填前端域名，后端推流地址会自动识别并反代；也可显式填写后端域名。</div>
-            <div class="row2" style="margin-bottom:14px;">
-                <div class="field">
-                    <label>前端域名（登录/网页/API）</label>
-                    <input id="cfgFrontend" placeholder="如 https://web.emby.com（留空则用节点目标）">
-                </div>
-                <div class="field">
-                    <label>后端推流域名（播放/媒体流）</label>
-                    <input id="cfgBackend" placeholder="如 https://media.emby.com（可留空自动识别）">
-                </div>
-            </div>
-            <div class="field" style="margin-bottom:14px;">
-                <label>全局网络优先（IPv6 / IPv4）</label>
-                <select id="cfgNetPref">
-                    <option value="auto">自动（跟随系统解析顺序）</option>
-                    <option value="v6">全局优先 IPv6</option>
-                    <option value="v4">全局优先 IPv4</option>
-                </select>
-                <div style="font-size:12px;color:var(--text-sec);margin-top:6px;">IPv6 优先适合纯 IPv6 / 双栈机器且源站支持 IPv6 的场景；目标无对应地址族时自动回退。单个节点可在「反代节点 → 编辑」中单独覆盖。</div>
-            </div>
-            <button class="btn-submit" onclick="saveConfig()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg> 保存反代配置</button>
-        </div>
-
         <!-- 反代节点 -->
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px;">
@@ -371,6 +345,18 @@
                 <div style="font-size:14px; font-weight:600; color:var(--text-sec); margin-bottom:10px;">服务器线路配置（支持魔改分离版推流，支持多条备用线路）</div>
                 <div id="targetInputs" style="display:flex; flex-direction:column; gap:10px;"></div>
                 <button type="button" class="btn-ghost" onclick="addTargetRow()" style="margin-top:8px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> 添加备用线路</button>
+            </div>
+            <div style="background: rgba(120,120,120,0.05); border: 1px solid var(--border); border-radius: 10px; padding: 16px;">
+                <div style="font-size:14px; font-weight:600; color:var(--text-sec); margin-bottom:10px;">前后端分离（可选）</div>
+                <div class="field" style="margin-bottom:10px;">
+                    <label>前端域名</label>
+                    <input type="text" id="rtFrontendDomain" placeholder="如 https://white.example.com:8443（留空自动）">
+                </div>
+                <div class="field">
+                    <label>推流域名</label>
+                    <input type="text" id="rtBackendDomain" placeholder="如 http://media.example.com:8888（留空自动识别）">
+                </div>
+                <div style="font-size:12px;color:var(--text-sec);margin-top:8px;">前端域名 = 同一台服务器的别名，改写为 /前缀/路径；推流域名 = 另一台媒体主机，改写为 /前缀/http://host:port/路径 并直接回源到它。</div>
             </div>
             <label class="switch-label">
                 <span class="switch" id="rtCache" onclick="this.classList.toggle('on')"></span> 开启海报及静态资源缓存
@@ -533,8 +519,9 @@ async function doLogin() {
   if (!token) return toast(I.warn + ' 请输入密钥');
   try {
     const data = await api('/api/login', { method: 'POST', body: JSON.stringify({ token }) });
-    if (data.success) { role = data.role; enterPanel(); toast(I.check + ' 登录成功'); }
-  } catch (e) { toast(I.warn + ' 密钥错误'); }
+    if (data && data.success) { role = data.role; enterPanel(); toast(I.check + ' 登录成功'); }
+    else { toast(I.warn + ' ' + ((data && data.error) || '密钥错误')); }
+  } catch (e) { toast(I.warn + ' 密钥错误或网络异常'); }
 }
 
 async function doLogout() {
@@ -581,25 +568,6 @@ async function updateRTT() {
     val.textContent = '--';
     dot.style.background = '#ff3b30'; dot.style.boxShadow = '0 0 6px #ff3b30';
   }
-}
-
-/* ============ 反代配置（前后端分离） ============ */
-async function loadConfig() {
-  if (role !== 'admin') { $('cfgFrontend').value = ''; $('cfgBackend').value = ''; $('cfgNetPref').value = 'auto'; return; }
-  try {
-    const data = await api('/api/config');
-    $('cfgFrontend').value = data.frontendDomain || '';
-    $('cfgBackend').value = data.backendDomain || '';
-    $('cfgNetPref').value = ['auto', 'v6', 'v4'].includes(data.networkPreference) ? data.networkPreference : 'auto';
-  } catch (e) {}
-}
-
-async function saveConfig() {
-  if (role !== 'admin') return toast(I.warn + ' 仅管理员可操作');
-  try {
-    await api('/api/config', { method: 'POST', body: JSON.stringify({ frontendDomain: $('cfgFrontend').value.trim(), backendDomain: $('cfgBackend').value.trim(), networkPreference: $('cfgNetPref').value }) });
-    toast(I.check + ' 反代配置已保存');
-  } catch (e) { toast(I.warn + ' 保存失败'); }
 }
 
 /* ============ 节点管理 ============ */
@@ -651,7 +619,7 @@ function renderRoutes() {
           <div class="emby-icon">${iconHtml}</div>
           <div class="card-title-txt">
             <h3>/${escapeHtml(r.prefix)}</h3>
-            <div class="target-txt">${ic ? escapeHtml(r.icon) : 'Emby 反代节点'}</div>
+            <div class="target-txt">${r.name ? escapeHtml(r.name) : (ic ? escapeHtml(r.icon) : 'Emby 反代节点')}</div>
           </div>
         </div>
         <span class="drag-handle" title="拖拽排序">${I.lines}</span>
@@ -780,6 +748,8 @@ function openNodeModal(prefix) {
   $('nodeModalTitle').innerHTML = I.pencil + ' 添加节点';
   $('rtSubmitBtn').textContent = '保存部署';
   $('rtRemark').value = '';
+  $('rtFrontendDomain').value = '';
+  $('rtBackendDomain').value = '';
   $('rtPrefix').value = '';
   $('rtMode').value = 'off';
   $('rtNetPref').value = 'auto';
@@ -796,6 +766,9 @@ function openNodeModal(prefix) {
       $('nodeModalTitle').innerHTML = I.pencil + ' 编辑节点';
       $('rtSubmitBtn').textContent = '保存修改';
       $('rtPrefix').value = r.prefix;
+      $('rtRemark').value = r.name || '';
+      $('rtFrontendDomain').value = r.frontendDomain || '';
+      $('rtBackendDomain').value = r.backendDomain || '';
       $('rtMode').value = r.mode || 'off';
       $('rtNetPref').value = r.v6 || 'auto';
       $('rtCache').classList.toggle('on', !!r.cache_img);
@@ -831,7 +804,13 @@ $('addForm').addEventListener('submit', async (e) => {
   const btn = $('rtSubmitBtn');
   btn.disabled = true; btn.textContent = '保存中…';
   try {
-    await api('/api/routes', { method: 'POST', body: JSON.stringify({ prefix, target, mode, cache_img: cache, icon: selectedIcon, v6 }) });
+    const name = $('rtRemark').value.trim();
+    const frontendDomain = $('rtFrontendDomain').value.trim();
+    const backendDomain = $('rtBackendDomain').value.trim();
+    await api('/api/routes', { method: 'POST', body: JSON.stringify({
+      prefix, originalPrefix: editingPrefix || '', name, target, mode,
+      cache_img: cache, icon: selectedIcon, v6, frontendDomain, backendDomain,
+    }) });
     toast(I.check + ' 节点已保存');
     closeNodeModal();
     loadRoutes();
@@ -870,7 +849,7 @@ $('importFile').addEventListener('change', async (e) => {
     const data = JSON.parse(text);
     const res = await api('/api/routes/import', { method: 'POST', body: JSON.stringify(data) });
     toast(I.check + ' 导入成功：' + (res.count || 0) + ' 个节点');
-    loadRoutes(); loadConfig();
+    loadRoutes();
   } catch (err) { toast(I.warn + ' 导入失败：备份格式错误'); }
   e.target.value = '';
 });
@@ -1121,7 +1100,6 @@ function escapeHtml(s) {
 
 function loadAll() {
   loadRoutes().catch(e => toast(I.warn + ' 加载节点失败'));
-  loadConfig();
   loadSubs();
   loadStats();
   updateRTT();
