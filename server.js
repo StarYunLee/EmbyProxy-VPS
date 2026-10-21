@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
 
-// VERSION: 1.5.0（新增 IP 访问控制：白/黑名单 + 国家封锁 + /entry 逃生）
+// VERSION: 1.5.1-fork.1（基于上游 1.5.0：节点级前后端域名、改名、缓存开关修复、订阅者鉴权）
 const PORT = parseInt(process.env.PORT || '3333', 10);
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
@@ -32,8 +32,6 @@ function ensureData() {
       adminToken: 'changeme_please',
       adminPass: null,
       subscribers: [],
-      frontendDomain: '',
-      backendDomain: '',
       networkPreference: 'auto',
       ipguard: { mode: 'off', ips: [], countries: [], redirect: '' },
       ipguardTrusted: [],
@@ -386,6 +384,15 @@ function hasAuthLikeState(headers, targetUrl) {
     || headers.has('Cookie') || hasQuery;
 }
 
+/** 把用户填的域名/地址归一化成 origin；没有协议时按 https 补全 */
+function normalizeOrigin(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return null;
+  try { return new URL(v).origin; } catch (e) {}
+  try { return new URL('https://' + v).origin; } catch (e) {}
+  return null;
+}
+
 /** 收集源站 origin（含 http/https 互换 + 裸 host 变体） */
 function getTargetOrigins(targets, extra) {
   const origins = [];
@@ -580,6 +587,7 @@ async function handleProxy(req, res, pathname, search) {
   let targetUrls = [];
   let remainingPath = '';
   let matchedPrefix = null;
+  let matchedRoute = null;
   let mode = 'off';
   let enableCache = true;
   let ipv6Mode = 'auto';
@@ -594,9 +602,10 @@ async function handleProxy(req, res, pathname, search) {
     if (!prefix) return sendText(res, 404, 'Not Found');
     const route = routes.find(r => r.prefix === prefix);
     if (!route) return sendText(res, 404, 'Not Found');
+    matchedRoute = route;
     matchedPrefix = prefix;
     mode = route.mode || 'off';
-    enableCache = route.cache_img !== 'off';
+    enableCache = route.cache_img !== 'off' && route.cache_img !== false;
     ipv6Mode = route.v6 || 'auto';
     remainingPath = '/' + parts.slice(2).join('/');
     targetUrls = (route.target || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -628,7 +637,19 @@ async function handleProxy(req, res, pathname, search) {
   }
 
   const realIp = getClientIp(req);
-  const baseOrigins = getTargetOrigins(targetUrls, [config.frontendDomain, config.backendDomain]);
+  // 前端域名 = 同一个站的别名 → 形式A（/前缀/路径，走节点地址回源）
+  const baseOrigins = getTargetOrigins(targetUrls, [
+    matchedRoute && matchedRoute.frontendDomain,
+  ]);
+
+  // 后端域名 = 另一台媒体主机 → 形式B（/前缀/完整地址，直接回源到该主机）
+  const forcedMedia = [];
+  for (const raw of [matchedRoute && matchedRoute.backendDomain]) {
+    const origin = normalizeOrigin(raw);
+    if (origin && !baseOrigins.includes(origin) && !forcedMedia.some(f => f.origin === origin)) {
+      forcedMedia.push({ origin });
+    }
+  }
 
   let lastError = null;
 
@@ -720,7 +741,10 @@ async function handleProxy(req, res, pathname, search) {
 
           // 自动识别：未配置 backendDomain 时，从媒体响应里学习源站
           const mediaFound = extractMediaOrigins(text, baseOrigins.map(o => o));
-          let rewritten = rewriteUrlsInText(text, baseOrigins, mediaFound, proxyOrigin, matchedPrefix || '');
+          const mediaAll = forcedMedia.concat(
+            mediaFound.filter(m => !forcedMedia.some(f => f.origin === m.origin))
+          );
+          let rewritten = rewriteUrlsInText(text, baseOrigins, mediaAll, proxyOrigin, matchedPrefix || '');
 
           const headersOut = { ...upstreamHeaders };
           delete headersOut['content-length'];
@@ -912,21 +936,34 @@ async function handleApi(req, res, url) {
     if (!prefix || !target) return sendJSON(res, 400, { success: false, error: '前缀和目标不能为空' });
     if (!/^https?:\/\//i.test(target)) return sendJSON(res, 400, { success: false, error: '目标必须是 http(s) 地址' });
 
-    const existing = routes.find(r => r.prefix === prefix);
+    const originalPrefix = String(body.originalPrefix || '').trim().replace(/^\/+|\/+$/g, '');
+    const existing = routes.find(r => r.prefix === (originalPrefix || prefix));
     if (existing) {
+      if (originalPrefix && originalPrefix !== prefix) {
+        if (routes.some(r => r.prefix === prefix)) {
+          return sendJSON(res, 400, { success: false, error: '该前缀已被其他站点占用' });
+        }
+        existing.prefix = prefix;
+      }
       existing.target = target;
       existing.mode = body.mode || existing.mode || 'off';
       existing.cache_img = body.cache_img !== undefined ? body.cache_img : existing.cache_img;
       if (body.v6 !== undefined) existing.v6 = body.v6;
       if (body.icon !== undefined) existing.icon = body.icon;
+      if (body.name !== undefined) existing.name = String(body.name || '').trim();
+      if (body.frontendDomain !== undefined) existing.frontendDomain = String(body.frontendDomain || '').trim();
+      if (body.backendDomain !== undefined) existing.backendDomain = String(body.backendDomain || '').trim();
     } else {
       routes.push({
         prefix,
+        name: String(body.name || '').trim(),
         target,
         mode: body.mode || 'off',
         cache_img: body.cache_img !== undefined ? body.cache_img : true,
         v6: body.v6 || 'auto',
         icon: body.icon || '',
+        frontendDomain: String(body.frontendDomain || '').trim(),
+        backendDomain: String(body.backendDomain || '').trim(),
         sort_order: routes.length + 1,
         createdAt: nowStr(),
       });
@@ -956,7 +993,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === '/api/routes/export' && req.method === 'GET') {
-    const json = JSON.stringify({ routes, config: { frontendDomain: config.frontendDomain, backendDomain: config.backendDomain, networkPreference: config.networkPreference || 'auto' } }, null, 2);
+    const json = JSON.stringify({ routes }, null, 2);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="emby_proxy_backup.json"' });
     res.end(json);
     return;
@@ -968,27 +1005,24 @@ async function handleApi(req, res, url) {
     if (!body || !Array.isArray(body.routes)) return sendJSON(res, 400, { success: false, error: '备份格式错误' });
     routes = body.routes.map(r => ({
       prefix: String(r.prefix || '').trim().replace(/^\/+|\/+$/g, ''),
+      name: String(r.name || '').trim(),
       target: String(r.target || '').trim(),
       mode: r.mode || 'off',
       cache_img: r.cache_img !== undefined ? r.cache_img : true,
       v6: r.v6 || 'auto',
       icon: r.icon || '',
+      frontendDomain: String(r.frontendDomain || '').trim(),
+      backendDomain: String(r.backendDomain || '').trim(),
       sort_order: r.sort_order || 1,
       createdAt: r.createdAt || nowStr(),
     })).filter(r => r.prefix && r.target);
-    if (body.config) {
-      config.frontendDomain = body.config.frontendDomain || '';
-      config.backendDomain = body.config.backendDomain || '';
-      if (body.config.networkPreference !== undefined) config.networkPreference = ['auto', 'v6', 'v4'].includes(body.config.networkPreference) ? body.config.networkPreference : 'auto';
-      persistConfig();
-      applyIpv6Policy();
-    }
     persistRoutes();
     return sendJSON(res, 200, { success: true, count: routes.length });
   }
 
   /* ---- 订阅者 ---- */
   if (url.pathname === '/api/subscribers' && req.method === 'GET') {
+    if (!needAdmin(url.pathname)) return;
     return sendJSON(res, 200, { success: true, subscribers: config.subscribers || [] });
   }
 
@@ -1006,25 +1040,6 @@ async function handleApi(req, res, url) {
     }
     persistConfig();
     return sendJSON(res, 200, { success: true, subscribers: config.subscribers });
-  }
-
-  /* ---- 前后端分离配置 ---- */
-  if (url.pathname === '/api/config' && req.method === 'GET') {
-    if (!needAdmin(url.pathname)) return;
-    return sendJSON(res, 200, { success: true, frontendDomain: config.frontendDomain || '', backendDomain: config.backendDomain || '', networkPreference: config.networkPreference || 'auto' });
-  }
-
-  if (url.pathname === '/api/config' && req.method === 'POST') {
-    if (!needAdmin(url.pathname)) return;
-    const body = await readBody(req).then(b => { try { return JSON.parse(b.toString()); } catch (e) { return {}; } });
-    config.frontendDomain = String(body.frontendDomain || '').trim();
-    config.backendDomain = String(body.backendDomain || '').trim();
-    if (body.networkPreference !== undefined) {
-      config.networkPreference = ['auto', 'v6', 'v4'].includes(body.networkPreference) ? body.networkPreference : 'auto';
-      applyIpv6Policy();
-    }
-    persistConfig();
-    return sendJSON(res, 200, { success: true });
   }
 
   /* ---- 统计 ---- */
